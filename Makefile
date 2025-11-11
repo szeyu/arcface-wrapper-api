@@ -12,11 +12,11 @@ models:
 
 # Launch only the Postgres service via Docker Compose
 db:
-	docker compose -f arcface-api/docker-compose.yml up db
+	docker compose -f arcface-api/docker-compose.yml up -d db
+	@export DATABASE_URL=postgres://postgres:postgres@localhost:5432/face_db
 
 # Run the API locally with ts-node-dev (requires DATABASE_URL env)
-dev: install db
-	@export DATABASE_URL=postgres://postgres:postgres@localhost:5432/face_db
+run: install db
 	cd arcface-api && npm run dev
 
 # Build and start the full stack (API + Postgres) with Docker Compose

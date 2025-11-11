@@ -11,19 +11,11 @@
 make install
 # download ONNX models to arcface-api/models
 make models
-# start Postgres (runs until you stop it)
+# start Postgres only
 make db
-# in a second terminal, run the API locally
-make dev
+# run the API locally
+make run
 ```
-
-Set `DATABASE_URL` in your shell before running `make dev`. Example:
-
-```bash
-export DATABASE_URL=postgres://postgres:postgres@localhost:5432/face_db
-```
-
-The `make db` target uses Docker to run Postgres only; you can stop it with `Ctrl+C`.
 
 ## Start with Docker Compose
 
