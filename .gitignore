@@ -1,5 +1,6 @@
 # ArcFace API
 arcface-api/models
+arcface-api/output
 
 # Logs
 logs

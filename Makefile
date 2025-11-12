@@ -1,4 +1,4 @@
-.PHONY: install models dev db up down logs clean
+.PHONY: install models dev db up down logs clean chmod-scripts
 
 # Install Node dependencies for the API (outside Docker)
 install:
@@ -13,10 +13,10 @@ models:
 # Launch only the Postgres service via Docker Compose
 db:
 	docker compose -f arcface-api/docker-compose.yml up -d db
-	@export DATABASE_URL=postgres://postgres:postgres@localhost:5432/face_db
 
 # Run the API locally with ts-node-dev (requires DATABASE_URL env)
 run: install db
+	export DATABASE_URL=postgres://postgres:postgres@localhost:5432/face_db && \
 	cd arcface-api && npm run dev
 
 # Build and start the full stack (API + Postgres) with Docker Compose
@@ -39,3 +39,5 @@ clean:
 reset: clean
 	docker compose -f arcface-api/docker-compose.yml up --build
 
+chmod-scripts:
+	chmod +x scripts/*

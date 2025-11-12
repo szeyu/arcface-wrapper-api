@@ -3,6 +3,12 @@ import { Jimp } from "jimp";
 
 const SCRFD_MODEL = "./models/scrfd.onnx";
 const ARC_FACE_MODEL = "./models/arcface.onnx";
+const SCRFD_INPUT_SIZE = 640;
+const SCRFD_STRIDES = [8, 16, 32];
+const SCRFD_ANCHORS_PER_LOCATION = 2;
+const SCRFD_CONFIDENCE_THRESHOLD = 0.9;
+const SCRFD_MIN_FACE_SIZE = 40;
+const SCRFD_MIN_FACE_AREA = SCRFD_MIN_FACE_SIZE * SCRFD_MIN_FACE_SIZE;
 
 let scrfdSession: any;
 let arcfaceSession: any;
@@ -33,11 +39,106 @@ export const preprocessImage = async (base64: string) => {
   return data;
 };
 
-// NOTE: SCRFD detection simplified for single face
-export const detectFace = async (_base64: string) => {
-  // For simplicity, assume image already roughly cropped and has exactly one face.
-  // If you later enable detection, run scrfdSession with input tensor and parse boxes.
-  return true;
+const preprocessForDetection = async (base64: string) => {
+  const buffer = Buffer.from(base64, "base64");
+  const image = await Jimp.read(buffer);
+  await image.resize({ w: SCRFD_INPUT_SIZE, h: SCRFD_INPUT_SIZE });
+
+  const data = new Float32Array(3 * SCRFD_INPUT_SIZE * SCRFD_INPUT_SIZE);
+  let ptr = 0;
+  const { width, height, data: bitmapData } = image.bitmap;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const idx = (width * y + x) * 4;
+      data[ptr++] = (bitmapData[idx] / 255.0 - 0.5) / 0.5; // R
+      data[ptr++] = (bitmapData[idx + 1] / 255.0 - 0.5) / 0.5; // G
+      data[ptr++] = (bitmapData[idx + 2] / 255.0 - 0.5) / 0.5; // B
+    }
+  }
+  return data;
+};
+
+type OrtTensorLike = {
+  dims?: readonly number[];
+  data: unknown;
+};
+
+const groupScrfdOutputs = (outputs: Record<string, OrtTensorLike>) => {
+  const grouped: Record<
+    number,
+    {
+      scores?: Float32Array;
+      bboxes?: Float32Array;
+    }
+  > = {};
+
+  Object.values(outputs).forEach((tensor) => {
+    if (!tensor.dims || tensor.dims.length !== 2) return;
+    const [numAnchors, channels] = tensor.dims;
+
+    for (const stride of SCRFD_STRIDES) {
+      const featSize = SCRFD_INPUT_SIZE / stride;
+      const expectedAnchors = featSize * featSize * SCRFD_ANCHORS_PER_LOCATION;
+      if (numAnchors !== expectedAnchors) continue;
+
+      grouped[stride] = grouped[stride] || {};
+      if (channels === 1) {
+        grouped[stride].scores = tensor.data as Float32Array;
+      } else if (channels === 4) {
+        grouped[stride].bboxes = tensor.data as Float32Array;
+      }
+      break;
+    }
+  });
+
+  return grouped;
+};
+
+export const detectFace = async (base64: string) => {
+  if (!scrfdSession) {
+    throw new Error("SCRFD model not initialised");
+  }
+
+  const inputData = await preprocessForDetection(base64);
+  const tensor = new ort.Tensor("float32", inputData, [1, 3, SCRFD_INPUT_SIZE, SCRFD_INPUT_SIZE]);
+  const outputs = await scrfdSession.run({ "input.1": tensor });
+
+  const grouped = groupScrfdOutputs(outputs);
+
+  for (const stride of SCRFD_STRIDES) {
+    const entry = grouped[stride];
+    if (!entry?.scores || !entry?.bboxes) continue;
+
+    const scores = entry.scores;
+    const bboxes = entry.bboxes;
+
+    for (let i = 0; i < scores.length; i += 1) {
+      const rawScore = scores[i];
+      const prob = 1 / (1 + Math.exp(-rawScore));
+      if (prob < SCRFD_CONFIDENCE_THRESHOLD) continue;
+
+      const offset = i * 4;
+      const left = bboxes[offset] * stride;
+      const top = bboxes[offset + 1] * stride;
+      const right = bboxes[offset + 2] * stride;
+      const bottom = bboxes[offset + 3] * stride;
+
+      const width = left + right;
+      const height = top + bottom;
+      const area = width * height;
+
+      if (
+        width >= SCRFD_MIN_FACE_SIZE &&
+        height >= SCRFD_MIN_FACE_SIZE &&
+        width <= SCRFD_INPUT_SIZE &&
+        height <= SCRFD_INPUT_SIZE &&
+        area >= SCRFD_MIN_FACE_AREA
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 };
 
 export const computeEmbedding = async (preprocessed: Float32Array) => {
