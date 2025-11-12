@@ -6,8 +6,8 @@ const ARC_FACE_MODEL = "./models/arcface.onnx";
 const SCRFD_INPUT_SIZE = 640;
 const SCRFD_STRIDES = [8, 16, 32];
 const SCRFD_ANCHORS_PER_LOCATION = 2;
-const SCRFD_CONFIDENCE_THRESHOLD = 0.9;
-const SCRFD_MIN_FACE_SIZE = 40;
+const SCRFD_CONFIDENCE_THRESHOLD = 0.5;
+const SCRFD_MIN_FACE_SIZE = 20;
 const SCRFD_MIN_FACE_AREA = SCRFD_MIN_FACE_SIZE * SCRFD_MIN_FACE_SIZE;
 
 let scrfdSession: any;
@@ -118,21 +118,35 @@ export const detectFace = async (base64: string) => {
       if (prob < SCRFD_CONFIDENCE_THRESHOLD) continue;
 
       const offset = i * 4;
-      const left = bboxes[offset] * stride;
-      const top = bboxes[offset + 1] * stride;
-      const right = bboxes[offset + 2] * stride;
-      const bottom = bboxes[offset + 3] * stride;
+      // SCRFD bbox format: distances from anchor center (left, top, right, bottom)
+      const leftDist = bboxes[offset] * stride;
+      const topDist = bboxes[offset + 1] * stride;
+      const rightDist = bboxes[offset + 2] * stride;
+      const bottomDist = bboxes[offset + 3] * stride;
 
-      const width = left + right;
-      const height = top + bottom;
+      // Basic validation: ensure distances are positive and reasonable
+      if (leftDist <= 0 || topDist <= 0 || rightDist <= 0 || bottomDist <= 0) {
+        continue;
+      }
+
+      const width = leftDist + rightDist;
+      const height = topDist + bottomDist;
+
+      // Check if face is reasonable size (not too small, not larger than image)
+      // Also ensure aspect ratio is reasonable for a face (roughly square to 2:1)
+      const aspectRatio = width / height;
       const area = width * height;
-
+      
+      // Very lenient size check - just ensure it's not tiny and not larger than image
+      // Aspect ratio check helps filter out boxes (which are usually very rectangular)
+      // Faces are typically between 0.5 and 2.0 aspect ratio, boxes can be 5:1 or more
       if (
         width >= SCRFD_MIN_FACE_SIZE &&
         height >= SCRFD_MIN_FACE_SIZE &&
         width <= SCRFD_INPUT_SIZE &&
         height <= SCRFD_INPUT_SIZE &&
-        area >= SCRFD_MIN_FACE_AREA
+        aspectRatio >= 0.25 && // Very lenient - allow tall faces
+        aspectRatio <= 4.0     // Very lenient - but boxes are often 10:1 or more
       ) {
         return true;
       }
