@@ -1,6 +1,8 @@
 #!/bin/bash
 # Delete all orphaned faces (faces not enrolled with any customer)
 
+set -euo pipefail
+
 API_URL=${1:-"http://localhost:3000"}
 
 echo "⚠️  Deleting all orphaned faces..."
@@ -19,7 +21,7 @@ if [ "$CONFIRM" != "yes" ]; then
 fi
 
 echo ""
-curl -X DELETE -s "$API_URL/api/management/faces/orphaned" | jq '.'
+curl -fsS -X DELETE "$API_URL/api/management/faces/orphaned" | jq '.'
 
 echo ""
 echo "✓ Orphaned faces deletion complete"

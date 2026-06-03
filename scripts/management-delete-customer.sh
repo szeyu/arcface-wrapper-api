@@ -1,6 +1,8 @@
 #!/bin/bash
 # Delete an enrolled customer by customer_id
 
+set -euo pipefail
+
 if [ -z "$1" ]; then
   echo "Usage: $0 <customer_id> [api_url]"
   echo "Example: $0 abc-123-def-456"
@@ -28,7 +30,7 @@ if [ "$CONFIRM" != "yes" ]; then
 fi
 
 echo ""
-curl -X DELETE -s "$API_URL/api/management/customers/$CUSTOMER_ID" | jq '.'
+curl -fsS -X DELETE "$API_URL/api/management/customers/$CUSTOMER_ID" | jq '.'
 
 echo ""
 echo "✓ Customer deletion complete"

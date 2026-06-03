@@ -1,6 +1,7 @@
 # AWS Rekognition Clone
 models/
 output/
+benchmarks/results/
 project_data/
 
 # Claude
@@ -58,6 +59,7 @@ web_modules/
 
 # Optional npm cache directory
 .npm
+.npm-cache/
 
 # Optional eslint cache
 .eslintcache

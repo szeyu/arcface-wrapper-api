@@ -40,7 +40,7 @@ else
 fi
 
 # Send enrollment request
-curl -X POST "$API_URL/api/faces/enroll" \
+curl -fsS -X POST "$API_URL/api/faces/enroll" \
   -H "Content-Type: application/json" \
   -d "$PAYLOAD" \
   | jq .

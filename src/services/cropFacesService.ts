@@ -1,7 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { detectAllFacesWithRetinaFace } from "../embedding";
-import { cropImageRegion } from "../utils/imageUtils";
+import { alignFaceFromLandmarks, cropImageRegion } from "../utils/imageUtils";
 import { NoFaceDetectedError } from "../utils/errors";
 
 // Use /tmp inside Docker for ephemeral temporary files
@@ -52,14 +52,15 @@ export const cropAndSaveFaces = async (imageBase64: string): Promise<number> => 
     const face = faces[i];
     const bbox = face.PixelBoundingBox;
 
-    // Crop the face region
-    const croppedBase64 = await cropImageRegion(
-      imageBase64,
-      bbox.Left,
-      bbox.Top,
-      bbox.Width,
-      bbox.Height
-    );
+    const croppedBase64 = face.Landmarks?.length
+      ? await alignFaceFromLandmarks(imageBase64, face.Landmarks)
+      : await cropImageRegion(
+          imageBase64,
+          bbox.Left,
+          bbox.Top,
+          bbox.Width,
+          bbox.Height
+        );
 
     // Save cropped face to file
     const filename = `face_${i}.jpg`;

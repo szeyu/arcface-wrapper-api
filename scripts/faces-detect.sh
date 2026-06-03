@@ -11,7 +11,7 @@ API_URL="${3:-http://localhost:3000}"
 
 if [ -z "$IMAGE_PATH" ]; then
   echo "Usage: $0 <image_path> [identifier] [api_url]"
-  echo "Example: $0 examples/elon_musk_1.jpg customer_123"
+  echo "Example: $0 examples/elon_musk_enroll.jpg customer_123"
   exit 1
 fi
 
@@ -29,13 +29,13 @@ echo ""
 
 # Send multipart form-data request
 if [ -n "$IDENTIFIER" ]; then
-  curl -X POST "$API_URL/api/faces/detect" \
+  curl -fsS -X POST "$API_URL/api/faces/detect" \
     -F "file=@$IMAGE_PATH" \
     -F "identifier=$IDENTIFIER" \
     -H "Accept: application/json" \
     | jq .
 else
-  curl -X POST "$API_URL/api/faces/detect" \
+  curl -fsS -X POST "$API_URL/api/faces/detect" \
     -F "file=@$IMAGE_PATH" \
     -H "Accept: application/json" \
     | jq .

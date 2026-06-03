@@ -1,7 +1,9 @@
-include .env
+-include .env
 export
 
-.PHONY: install install-dev models dev db up-db up-minio up down logs clean chmod-scripts reset run lint lint-fix test test-integration test-management
+.PHONY: install install-dev models dev db up-db up-rustfs up down logs clean chmod-scripts reset run lint lint-fix test test-storage test-integration test-management test-examples verify-recognition-examples benchmark-performance
+
+COMPOSE := docker compose --env-file .env -f docker-compose.yml
 
 # Install production Node dependencies only (for Docker/production)
 install:
@@ -19,27 +21,47 @@ lint: install-dev
 lint-fix: install-dev
 	npm run lint:fix
 
+# Run RustFS storage integration test only
+test-storage: install-dev up-rustfs
+	S3_ENDPOINT=http://localhost:9000 npm test -- src/__tests__/storage.test.ts
+
+# Run full test suite
+test: install-dev models up-db up-rustfs
+	S3_ENDPOINT=http://localhost:9000 npm test
+
 # Run integration test only
-test-integration: install-dev models up-db up-minio
+test-integration: install-dev models up-db up-rustfs
 	S3_ENDPOINT=http://localhost:9000 npm test -- src/__tests__/integration.test.ts
 
 # Run management test only
-test-management: install-dev models up-db up-minio
+test-management: install-dev models up-db up-rustfs
 	S3_ENDPOINT=http://localhost:9000 npm test -- src/__tests__/management.test.ts
+
+# Run examples fixture coverage test only
+test-examples: install-dev models up-db up-rustfs
+	S3_ENDPOINT=http://localhost:9000 npm test -- src/__tests__/examples.test.ts
+
+# Run positive and negative recognition examples against a running API
+verify-recognition-examples:
+	./scripts/verify-recognition-examples.sh
+
+# Run API benchmark against a running API and write reports to benchmarks/results/
+benchmark-performance: install-dev
+	npm run benchmark
 
 # Download ONNX models locally into models/ (only if they don't exist)
 models:
 	@mkdir -p models
-	@if [ ! -f models/arcface.onnx ]; then \
-		echo "↓ Downloading arcface.onnx..."; \
-		curl -L -o models/arcface.onnx https://huggingface.co/onnxmodelzoo/arcfaceresnet100-8/resolve/main/arcfaceresnet100-8.onnx; \
-		echo "✓ arcface.onnx downloaded"; \
+	@if [ ! -f models/face_recognition.onnx ]; then \
+		echo "↓ Downloading face_recognition.onnx..."; \
+		curl -fL -o models/face_recognition.onnx https://huggingface.co/deepghs/insightface/resolve/main/buffalo_l/w600k_r50.onnx; \
+		echo "✓ face_recognition.onnx downloaded"; \
 	else \
-		echo "✓ arcface.onnx already exists, skipping download"; \
+		echo "✓ face_recognition.onnx already exists, skipping download"; \
 	fi
 	@if [ ! -f models/retinaface_resnet50.onnx ]; then \
 		echo "↓ Downloading retinaface_resnet50.onnx..."; \
-		curl -L -o models/retinaface_resnet50.onnx https://storage.googleapis.com/ailia-models/retinaface/retinaface_resnet50.onnx; \
+		curl -fL -o models/retinaface_resnet50.onnx https://storage.googleapis.com/ailia-models/retinaface/retinaface_resnet50.onnx; \
 		echo "✓ retinaface_resnet50.onnx downloaded"; \
 	else \
 		echo "✓ retinaface_resnet50.onnx already exists, skipping download"; \
@@ -49,35 +71,35 @@ models:
 
 # Launch only the Postgres service via Docker Compose
 up-db:
-	docker compose -f docker-compose.yml up -d db
+	$(COMPOSE) up -d db
 
-# Launch only the MinIO service via Docker Compose
-up-minio:
-	docker compose -f docker-compose.yml up -d minio
+# Launch only the RustFS service via Docker Compose
+up-rustfs:
+	$(COMPOSE) up -d rustfs
 
-# Run the API locally (requires db and minio running)
-run: install-dev models up-db up-minio
+# Run the API locally (requires db and RustFS running)
+run: install-dev models up-db up-rustfs
 	npm run dev
 
 # Build and start the full stack (API + Postgres) with Docker Compose
 up:
-	docker compose -f docker-compose.yml --env-file .env up --build
+	$(COMPOSE) up --build
 
 # Stop and remove running containers
 down:
-	docker compose -f docker-compose.yml --env-file .env down
+	$(COMPOSE) down
 
 # Tail logs from running containers
 logs:
-	docker compose -f docker-compose.yml --env-file .env logs -f
+	$(COMPOSE) logs -f
 
 # Remove containers, networks, and volumes
 clean:
-	docker compose -f docker-compose.yml down -v
+	$(COMPOSE) down -v
 
 # Clean and rebuild everything from scratch
 reset: clean
-	docker compose -f docker-compose.yml --env-file .env up --build
+	$(COMPOSE) up --build
 
 # Make all scripts executable
 chmod-scripts:

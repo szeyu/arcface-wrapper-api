@@ -8,9 +8,18 @@ import {
 import { Upload } from "@aws-sdk/lib-storage";
 import { Readable } from "stream";
 
+const isNoSuchKeyError = (error: unknown): boolean => {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const maybeError = error as { name?: string; Code?: string };
+  return maybeError.name === "NoSuchKey" || maybeError.Code === "NoSuchKey";
+};
+
 /**
- * S3 Storage Service for MinIO
- * Handles all object storage operations for face images
+ * S3-compatible storage service for RustFS.
+ * Handles all object storage operations for face images.
  */
 class S3Service {
   private client: S3Client;
@@ -19,8 +28,9 @@ class S3Service {
   constructor() {
     const endpoint = process.env.S3_ENDPOINT || "http://localhost:9000";
     const region = process.env.S3_REGION || "us-east-1";
-    const accessKeyId = process.env.S3_ACCESS_KEY || "minioadmin";
-    const secretAccessKey = process.env.S3_SECRET_KEY || "minioadmin";
+    const accessKeyId = process.env.S3_ACCESS_KEY || "rustfsadmin";
+    const secretAccessKey = process.env.S3_SECRET_KEY || "rustfsadmin";
+    const forcePathStyle = process.env.S3_FORCE_PATH_STYLE !== "false";
 
     this.client = new S3Client({
       endpoint,
@@ -29,7 +39,7 @@ class S3Service {
         accessKeyId,
         secretAccessKey,
       },
-      forcePathStyle: true, // Required for MinIO
+      forcePathStyle,
     });
 
     this.bucket = process.env.S3_BUCKET || "facevector-engine";
@@ -94,7 +104,9 @@ class S3Service {
         stream.on("end", () => resolve(Buffer.concat(chunks)));
       });
     } catch (error) {
-      console.error(`Failed to download image from S3: ${key}`, error);
+      if (!isNoSuchKeyError(error)) {
+        console.error(`Failed to download image from S3: ${key}`, error);
+      }
       throw new Error(`S3 download failed: ${error}`);
     }
   }

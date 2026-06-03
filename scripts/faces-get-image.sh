@@ -24,10 +24,9 @@ echo ""
 mkdir -p "$(dirname "$OUTPUT_PATH")"
 
 # Download face image
-curl -X GET "$API_URL/api/faces/$FACE_ID" \
+curl -fsS -X GET "$API_URL/api/faces/$FACE_ID" \
   -H "Accept: image/jpeg" \
-  -o "$OUTPUT_PATH" \
-  --fail
+  -o "$OUTPUT_PATH"
 
 echo ""
 echo "✓ Face image saved to: $OUTPUT_PATH"

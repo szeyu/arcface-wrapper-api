@@ -36,13 +36,13 @@ This document provides an in-depth technical explanation of how the FaceVector E
          │   │  │ RetinaFace (840) │    │      │
          │   │  └──────────────────┘    │      │
          │   │  ┌──────────────────┐    │      │
-         │   │  │ ArcFace (112)    │    │      │
+         │   │  │ Recognition (112)│    │      │
          │   │  └──────────────────┘    │      │
          │   └──────────────────────────┘      │
          │                                     │
 ┌────────▼────────────┐              ┌─────────▼──────────┐
 │   PostgreSQL +      │              │                    │
-│    pgvector         │              │   MinIO S3         │
+│    pgvector         │              │   RustFS S3        │
 │  ┌────────────────┐ │              │  ┌──────────────┐  │
 │  │ detected_faces │ │              │  │originals/    │  │
 │  └────────────────┘ │              │  └──────────────┘  │
@@ -80,20 +80,19 @@ User uploads image (e.g., 3000 x 2000 pixels, JPEG)
          ▼
 ┌────────────────────────────────────────────────────────────────┐
 │ Multer Middleware (src/middleware/upload.ts)                   │
-│ - Validates file type (PNG, JPG, WEBP)                         │
+│ - Validates file type (PNG, JPG, WEBP, AVIF)                   │
 │ - Checks file size (max 10MB)                                  │
 │ - Stores in memory as Buffer                                   │
 └────────┬───────────────────────────────────────────────────────┘
          │
          ▼
 ┌────────────────────────────────────────────────────────────────┐
-│ scaleDownImage() - src/utils/imageUtils.ts:74-91               │
+│ normalizeImageBuffer() + scaleDownImage() - imageUtils.ts      │
 │                                                                │
 │ Input:  Buffer (3000 x 2000)                                   │
-│ Logic:  if (width > 1920 OR height > 1920) {                   │
-│           scale to max 1920px (maintains aspect ratio)         │
-│         }                                                      │
-│ Output: Base64 string (1920 x 1280)                            │
+│ Logic:  Sharp auto-rotates and converts accepted formats       │
+│         to JPEG, then scales max side to 1920px                │
+│ Output: Base64 JPEG string (e.g., 1920 x 1280)                 │
 │                                                                │
 │ Why: Performance optimization - reduces processing time        │
 └────────┬───────────────────────────────────────────────────────┘
@@ -227,7 +226,7 @@ Return face_id to client
 | **Scaled** | Max 1920px (e.g., 1920×1280) | ✅ S3: `originals/` | Performance optimization |
 | **RetinaFace Input** | 840×840 (square) | ❌ | Face detection inference |
 | **Cropped Face** | Variable (e.g., 600×850) | ✅ S3: `faces/` | Detected face region |
-| **ArcFace Input** | 112×112 (square) | ❌ | Embedding generation |
+| **Recognition Input** | 112×112 (square) | ❌ | Embedding generation |
 
 ---
 
@@ -355,6 +354,17 @@ const scaleToPixelCoordinates = (
 
 ## Model Inference Details
 
+### Models Used by This Repository
+
+This project currently uses two ONNX files:
+
+| Purpose | Local file | Upstream file/source | Runtime input |
+|---------|------------|----------------------|---------------|
+| Face detection + 5 landmarks | `models/retinaface_resnet50.onnx` | RetinaFace ResNet-50 ONNX export | `1 x 3 x 840 x 840` RGB-like tensor with RetinaFace mean subtraction |
+| Face recognition embeddings | `models/face_recognition.onnx` | InsightFace Buffalo-L `w600k_r50.onnx` | `1 x 3 x 112 x 112` BGR tensor normalized to `[-1, 1]` |
+
+The recognition model is the InsightFace Buffalo-L ResNet-50 export saved locally as `face_recognition.onnx`.
+
 ### RetinaFace (Face Detection)
 
 **Model:** `retinaface_resnet50.onnx` (ResNet-50 backbone)
@@ -439,17 +449,17 @@ export const RETINAFACE = {
 
 ---
 
-### ArcFace (Face Embedding)
+### InsightFace Buffalo-L (Face Embedding)
 
-**Model:** `arcface.onnx` (ResNet-100 with ArcFace loss)
+**Model:** `face_recognition.onnx` (InsightFace Buffalo-L ResNet-50, downloaded from `buffalo_l/w600k_r50.onnx`)
 
 #### Architecture
 ```
-Input: [1, 3, 112, 112] RGB tensor (normalized to [-1, 1])
+Input: [1, 3, 112, 112] BGR tensor (normalized to [-1, 1])
          ↓
 ┌──────────────────────────────┐
-│  ResNet-100 Backbone         │
-│  - 100 convolutional layers  │
+│  ResNet-50 Backbone          │
+│  - 50-layer recognition net  │
 │  - Batch normalization       │
 │  - PReLU activation          │
 └──────────────────────────────┘
@@ -479,19 +489,21 @@ export const preprocessImage = async (base64: string) => {
   // Resize to 112×112
   await image.resize({ w: 112, h: 112 });
 
-  // Extract RGB and normalize to [-1, 1]
+  // Extract BGR channel-first data and normalize to [-1, 1]
   const data = new Float32Array(3 * 112 * 112);
-  let ptr = 0;
+  const imageSize = 112 * 112;
 
   for (let y = 0; y < 112; y++) {
     for (let x = 0; x < 112; x++) {
       const idx = (112 * y + x) * 4;
       const { data: bitmapData } = image.bitmap;
 
+      const pixelIndex = 112 * y + x;
+
       // Normalize: (pixel / 255.0 - 0.5) / 0.5 = (pixel - 127.5) / 127.5
-      data[ptr++] = (bitmapData[idx]     / 255.0 - 0.5) / 0.5; // R
-      data[ptr++] = (bitmapData[idx + 1] / 255.0 - 0.5) / 0.5; // G
-      data[ptr++] = (bitmapData[idx + 2] / 255.0 - 0.5) / 0.5; // B
+      data[pixelIndex] = (bitmapData[idx + 2] / 255.0 - 0.5) / 0.5; // B
+      data[imageSize + pixelIndex] = (bitmapData[idx + 1] / 255.0 - 0.5) / 0.5; // G
+      data[2 * imageSize + pixelIndex] = (bitmapData[idx] / 255.0 - 0.5) / 0.5; // R
     }
   }
 
@@ -506,7 +518,8 @@ export const computeEmbedding = async (preprocessed: Float32Array) => {
     [1, 3, 112, 112]
   );
 
-  const results = await arcfaceSession.run({ data: tensor });
+  const inputName = recognitionSession.inputNames[0];
+  const results = await recognitionSession.run({ [inputName]: tensor });
   const embedding = results[Object.keys(results)[0]].data;
 
   return Array.from(embedding); // Float32[512]
@@ -546,6 +559,22 @@ export const compareEmbeddings = (
 };
 ```
 
+#### Recognition Example Matrix
+
+The example tests intentionally include both easy positives and hard negatives. The default recognition threshold remains `0.5`; weak mixed-scene crops are not forced to pass by lowering the threshold.
+
+| Scenario | Enrolled identity | Probe image | Expected result at `0.5` |
+|----------|-------------------|-------------|---------------------------|
+| Positive solo match | `examples/elon_musk_enroll.jpg` | `examples/elon_musk_positive.jpg` | Elon is top match, observed around `0.69` |
+| Positive solo match | `examples/jensen_huang_enroll.jpg` | `examples/jensen_huang_positive.jpg` | Jensen is top match, observed around `0.56` |
+| Negative solo probe | Elon + Jensen enrollments | `examples/xi_jinping_solo.png` | No match, returns `[]` |
+| Multi-face same-image sanity | Xi + Trump enrolled from one mixed image | `examples/xi_jinping_trump_mixed_small.jpeg` | Same detected faces match their own enrolled identities |
+| Format normalization | N/A | `examples/elon_musk_jensen_huang_mixed_large.webp` and `.avif` | Faces are detected after Sharp normalization |
+
+This matrix is implemented in `src/__tests__/integration.test.ts`, `src/__tests__/management.test.ts`, and `scripts/verify-recognition-examples.sh`.
+
+`src/__tests__/examples.test.ts` is the fixture coverage gate: it enumerates every image in `examples/`, verifies each file is represented in the expected fixture matrix, runs detection for each supported image format, and checks `no_face_box.jpeg` returns the expected no-face error.
+
 #### Database Vector Search
 
 ```sql
@@ -573,7 +602,7 @@ LIMIT 10
 
 ## Storage Architecture
 
-### MinIO S3 Object Storage
+### RustFS S3-Compatible Object Storage
 
 **Bucket Structure:**
 ```
@@ -604,7 +633,7 @@ class S3Service {
         accessKeyId: process.env.S3_ACCESS_KEY,
         secretAccessKey: process.env.S3_SECRET_KEY,
       },
-      forcePathStyle: true,  // Required for MinIO
+      forcePathStyle: true,  // Required for local S3-compatible storage
     });
   }
 
@@ -636,6 +665,31 @@ class S3Service {
 ```
 
 ### PostgreSQL Database Schema
+
+```mermaid
+erDiagram
+    detected_faces ||--o| enrolled_customers : enrolls
+
+    detected_faces {
+        uuid id PK
+        text original_image_path
+        text face_image_path
+        text identifier
+        jsonb bounding_box
+        float confidence
+        timestamptz created_at
+    }
+
+    enrolled_customers {
+        uuid id PK
+        uuid face_id FK
+        text customer_identifier
+        text customer_name
+        jsonb customer_metadata
+        vector embedding
+        timestamptz created_at
+    }
+```
 
 #### Table: `detected_faces`
 
@@ -903,13 +957,13 @@ Body:
 │     "customer_id": "b2c3d4e5-...",                      │
 │     "customer_identifier": "CUST001",                   │
 │     "customer_name": "John Doe",                        │
-│     "confidence_score": 0.9856  ← High match!           │
+│     "confidence_score": 0.6708  ← Accepted match        │
 │   },                                                    │
 │   {                                                     │
 │     "customer_id": "c3d4e5f6-...",                      │
 │     "customer_identifier": "CUST002",                   │
 │     "customer_name": "Jane Smith",                      │
-│     "confidence_score": 0.7234  ← Lower match           │
+│     "confidence_score": 0.4123  ← Below threshold       │
 │   }                                                     │
 │ ]                                                       │
 └─────────────────────────────────────────────────────────┘
@@ -919,26 +973,71 @@ Body:
 
 ## Performance Optimizations
 
-### 1. Image Scaling
+Performance claims should be verified with the benchmark script rather than copied from a single machine. Run:
 
-**Purpose:** Reduce processing time and memory usage
+```bash
+make run
+make benchmark-performance
+```
+
+Reports are written to `benchmarks/results/` as JSON and Markdown. The benchmark measures real API calls for:
+
+| Operation | What it measures |
+|-----------|------------------|
+| `detect_single_face_jpeg` | Multipart JPEG upload with one expected face, Sharp normalization, RetinaFace detection, RustFS/database writes |
+| `detect_multi_face_jpeg` | Multipart JPEG upload with multiple expected faces; includes extra crop/alignment/storage work per detected face |
+| `detect_webp` | WEBP upload through the same normalization and detection path |
+| `detect_avif` | AVIF upload through the same normalization and detection path |
+| `recognize` | pgvector similarity lookup against enrolled benchmark identities |
+| `full_positive_flow` | Detect positive same-person probe, then recognize it |
+| `full_negative_flow` | Detect negative different-person probe, then verify no match at threshold `0.5` |
+
+### Latest Local Benchmark Result
+
+This sample was produced by `scripts/benchmark-performance.mjs` and is machine-specific. Treat it as a local baseline, not a universal performance guarantee.
+
+| Field | Value |
+|-------|-------|
+| Platform | Linux x64 |
+| Node.js | v24.16.0 |
+| Iterations | 3 |
+| ONNX execution provider | CPU |
+| GPU acceleration measured | - |
+| CPU model | - |
+| RAM | - |
+| Database | Local Docker PostgreSQL + pgvector |
+| Object storage | Local Docker RustFS |
+
+| Operation | Count | Min ms | P50 ms | P95 ms | Max ms | Avg ms |
+|-----------|-------|--------|--------|--------|--------|--------|
+| `detect_single_face_jpeg` | 3 | 1652.13 | 2919.14 | 3297.33 | 3297.33 | 2622.87 |
+| `detect_multi_face_jpeg` | 3 | 2275.97 | 2451.76 | 2817.55 | 2817.55 | 2515.09 |
+| `detect_webp` | 3 | 8653.15 | 8725.34 | 10114.76 | 10114.76 | 9164.42 |
+| `detect_avif` | 3 | 1323.25 | 1450.02 | 1491.38 | 1491.38 | 1421.55 |
+| `recognize` | 3 | 184.09 | 269.03 | 276.40 | 276.40 | 243.17 |
+| `full_positive_flow` | 3 | 2518.17 | 2722.87 | 2920.38 | 2920.38 | 2720.47 |
+| `full_negative_flow` | 3 | 2842.45 | 2871.55 | 3492.04 | 3492.04 | 3068.68 |
+
+| Recognition check | Expected | Result | Confidence |
+|-------------------|----------|--------|------------|
+| Jensen positive probe | Jensen | Jensen | 0.5658 |
+| Xi negative probe | No match | No match | - |
+
+### 1. Image Normalization and Scaling
+
+**Purpose:** Put JPEG, PNG, WEBP, and AVIF uploads on one deterministic pixel path while reducing processing time and memory usage.
 
 **Implementation:**
 ```typescript
-// src/utils/imageUtils.ts:74-91
+// src/utils/imageUtils.ts
 const scaleDownImage = async (buffer: Buffer, maxDimension = 1920) => {
-  const image = await bufferToJimp(buffer);
-  const { width, height } = image.bitmap;
+  const normalizedBuffer = await normalizeImageBuffer(buffer, maxDimension);
+  return normalizedBuffer.toString("base64");
+};
 
-  if (width > maxDimension || height > maxDimension) {
-    if (width > height) {
-      image.resize({ w: maxDimension });
-    } else {
-      image.resize({ h: maxDimension });
-    }
-  }
-
-  return jimpToBase64(image);
+const normalizeImageBuffer = async (buffer: Buffer, maxDimension?: number) => {
+  const pipeline = sharp(buffer).rotate();
+  // Resize with fit: "inside" and output JPEG.
 };
 ```
 
@@ -974,7 +1073,7 @@ WITH (lists = 100);
 **Benefits over filesystem:**
 - Scalable: Handle millions of images without filesystem limits
 - Concurrent access: Multiple API instances can read/write simultaneously
-- Backup: MinIO supports replication and versioning
+- Backup: RustFS supports S3-compatible object storage workflows; configure backup and replication according to your deployment plan
 - Cost-effective: Cheaper than block storage for large datasets
 
 ### 4. ONNX Runtime Optimizations
@@ -982,8 +1081,8 @@ WITH (lists = 100);
 **CPU Execution Provider:**
 ```typescript
 // src/embedding.ts:12-13
-arcfaceSession = await ort.InferenceSession.create(
-  MODEL_PATHS.ARCFACE,
+recognitionSession = await ort.InferenceSession.create(
+  MODEL_PATHS.FACE_RECOGNITION,
   { executionProviders: ['cpu'] }  // Can use 'cuda' for GPU
 );
 ```
@@ -1029,7 +1128,7 @@ return detectedFaces;  // All faces, largest first
 
 **Filtering:**
 ```typescript
-// Default threshold: 0.8 (80% confidence)
+// Default threshold: 0.8 for detection confidence
 // Configurable via env var: FACE_DETECTION_CONFIDENCE_THRESHOLD
 
 // src/config/constants.ts:26
@@ -1076,11 +1175,11 @@ PORT=3000
 # Face Detection
 FACE_DETECTION_CONFIDENCE_THRESHOLD=0.8  # 0.0 - 1.0
 
-# MinIO S3
+# RustFS S3-Compatible Storage
 S3_ENDPOINT=http://localhost:9000
 S3_BUCKET=facevector-engine
-S3_ACCESS_KEY=minioadmin
-S3_SECRET_KEY=minioadmin123
+S3_ACCESS_KEY=rustfsadmin
+S3_SECRET_KEY=rustfsadmin
 S3_REGION=us-east-1
 S3_FORCE_PATH_STYLE=true
 ```
@@ -1091,7 +1190,7 @@ S3_FORCE_PATH_STYLE=true
 // src/config/constants.ts
 
 // Model Input Sizes
-ARCFACE_INPUT_SIZE = 112       // ArcFace expects 112×112
+FACE_RECOGNITION_INPUT_SIZE = 112  // Recognition model expects 112×112
 RETINAFACE_IMAGE_SIZES = {
   MOBILE: 640,                 // Mobile variant
   RESNET50: 840                // ResNet-50 variant (used)
@@ -1144,10 +1243,12 @@ FACE_DETECTION_CONFIDENCE_THRESHOLD=0.6
 **Solutions:**
 - Enroll multiple images per person
 - Use high-quality, well-lit enrollment photos
-- Set minimum confidence threshold in application logic:
-  ```typescript
-  const matches = results.filter(m => m.confidence_score > 0.85);
+- Set minimum confidence threshold via `.env`:
+  ```bash
+  FACE_RECOGNITION_CONFIDENCE_THRESHOLD=0.5
   ```
+- You can also override it per request with `min_confidence` on `POST /api/faces/recognize`.
+- `confidence_score` is cosine similarity, not a calibrated probability. Tune it with project-specific positive and negative examples, not by treating `0.5` as "50% confidence".
 
 ### Issue: Slow Recognition
 
@@ -1162,10 +1263,12 @@ FACE_DETECTION_CONFIDENCE_THRESHOLD=0.6
 
 ## Further Reading
 
-- **ArcFace Paper:** [ArcFace: Additive Angular Margin Loss](https://arxiv.org/abs/1801.07698)
-- **RetinaFace Paper:** [RetinaFace: Single-stage Dense Face Localisation](https://arxiv.org/abs/1905.00641)
+- **InsightFace Project:** [deepinsight/insightface](https://github.com/deepinsight/insightface)
+- **InsightFace Buffalo-L ONNX Source:** [deepghs/insightface buffalo_l](https://huggingface.co/deepghs/insightface/tree/main/buffalo_l)
+- **RetinaFace Paper:** [RetinaFace: Single-stage Dense Face Localisation in the Wild](https://arxiv.org/abs/1905.00641)
 - **pgvector:** [GitHub - pgvector/pgvector](https://github.com/pgvector/pgvector)
 - **ONNX Runtime:** [ONNX Runtime Documentation](https://onnxruntime.ai/docs/)
+- **RustFS:** [rustfs/rustfs](https://github.com/rustfs/rustfs)
 
 ---
 
@@ -1177,7 +1280,7 @@ FACE_DETECTION_CONFIDENCE_THRESHOLD=0.6
 | Enrollment API | `src/controllers/facesController.ts:70-126` |
 | Recognition API | `src/controllers/facesController.ts:132-189` |
 | RetinaFace Implementation | `src/retinaface.ts` |
-| ArcFace Implementation | `src/embedding.ts` |
+| Face Recognition Implementation | `src/embedding.ts` |
 | Image Utilities | `src/utils/imageUtils.ts` |
 | S3 Service | `src/services/s3Service.ts` |
 | Database Connection | `src/db.ts` |

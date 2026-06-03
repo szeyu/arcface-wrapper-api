@@ -1,6 +1,8 @@
 #!/bin/bash
 # Delete a detected face by face_id (also deletes S3 images)
 
+set -euo pipefail
+
 if [ -z "$1" ]; then
   echo "Usage: $0 <face_id> [api_url]"
   echo "Example: $0 abc-123-def-456"
@@ -29,7 +31,7 @@ if [ "$CONFIRM" != "yes" ]; then
 fi
 
 echo ""
-curl -X DELETE -s "$API_URL/api/management/faces/$FACE_ID" | jq '.'
+curl -fsS -X DELETE "$API_URL/api/management/faces/$FACE_ID" | jq '.'
 
 echo ""
 echo "✓ Face deletion complete"

@@ -1,5 +1,5 @@
 import ort = require("onnxruntime-node");
-import { ARCFACE_INPUT_SIZE, MODEL_PATHS } from "./config/constants";
+import { FACE_RECOGNITION_INPUT_SIZE, MODEL_PATHS } from "./config/constants";
 import type { DetectedFace } from "./types/face";
 import { base64ToJimp } from "./utils/imageUtils";
 
@@ -7,10 +7,10 @@ import { base64ToJimp } from "./utils/imageUtils";
 export type { DetectedFace, Landmark } from "./types/face";
 
 type InferenceSession = Awaited<ReturnType<typeof ort.InferenceSession.create>>;
-let arcfaceSession: InferenceSession | null = null;
+let recognitionSession: InferenceSession | null = null;
 
 export const initModels = async () => {
-  arcfaceSession = await ort.InferenceSession.create(MODEL_PATHS.ARCFACE);
+  recognitionSession = await ort.InferenceSession.create(MODEL_PATHS.FACE_RECOGNITION);
 
   // Load RetinaFace model (required)
   const { initRetinaFaceModel } = await import("./retinaface.js");
@@ -20,30 +20,35 @@ export const initModels = async () => {
 // helper: decode base64 to tensor
 export const preprocessImage = async (base64: string) => {
   const image = await base64ToJimp(base64);
-  await image.resize({ w: ARCFACE_INPUT_SIZE, h: ARCFACE_INPUT_SIZE });
+  await image.resize({ w: FACE_RECOGNITION_INPUT_SIZE, h: FACE_RECOGNITION_INPUT_SIZE });
 
-  // Jimp is RGBA; we will extract RGB and normalize per channel
-  const data = new Float32Array(3 * ARCFACE_INPUT_SIZE * ARCFACE_INPUT_SIZE);
-  let ptr = 0;
+  // Jimp is RGBA; the InsightFace export expects OpenCV-style BGR in NCHW layout.
+  const data = new Float32Array(3 * FACE_RECOGNITION_INPUT_SIZE * FACE_RECOGNITION_INPUT_SIZE);
   const { width, height, data: bitmapData } = image.bitmap;
+  const imageSize = width * height;
+
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const idx = (width * y + x) * 4;
-      data[ptr++] = (bitmapData[idx] / 255.0 - 0.5) / 0.5; // R
-      data[ptr++] = (bitmapData[idx + 1] / 255.0 - 0.5) / 0.5; // G
-      data[ptr++] = (bitmapData[idx + 2] / 255.0 - 0.5) / 0.5; // B
+      const pixelIndex = width * y + x;
+
+      data[pixelIndex] = (bitmapData[idx + 2] / 255.0 - 0.5) / 0.5; // B
+      data[imageSize + pixelIndex] = (bitmapData[idx + 1] / 255.0 - 0.5) / 0.5; // G
+      data[2 * imageSize + pixelIndex] = (bitmapData[idx] / 255.0 - 0.5) / 0.5; // R
     }
   }
   return data;
 };
 
 export const computeEmbedding = async (preprocessed: Float32Array) => {
-  if (!arcfaceSession) {
-    throw new Error("ArcFace model not initialized");
+  if (!recognitionSession) {
+    throw new Error("Face recognition model not initialized");
   }
-  const tensor = new ort.Tensor("float32", preprocessed, [1, 3, ARCFACE_INPUT_SIZE, ARCFACE_INPUT_SIZE]);
-  const results = await arcfaceSession.run({ data: tensor });
-  const firstKey = Object.keys(results)[0];
+  const tensor = new ort.Tensor("float32", preprocessed, [1, 3, FACE_RECOGNITION_INPUT_SIZE, FACE_RECOGNITION_INPUT_SIZE]);
+  const inputName = recognitionSession.inputNames[0];
+  const outputName = recognitionSession.outputNames[0];
+  const results = await recognitionSession.run({ [inputName]: tensor });
+  const firstKey = outputName || Object.keys(results)[0];
   const embedding = results[firstKey].data as Float32Array;
   return Array.from(embedding);
 };
@@ -119,5 +124,3 @@ export const compareEmbeddings = (
     euclideanDistance
   };
 };
-
-

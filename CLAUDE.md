@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-FaceVector Engine - A production-ready face recognition and vector similarity search engine. A Node.js/TypeScript system using ArcFace embeddings for face recognition, RetinaFace for face detection with landmarks, and PostgreSQL with pgvector extension for efficient vector similarity search.
+FaceVector Engine - A production-ready face recognition and vector similarity search engine. A Node.js/TypeScript system using InsightFace Buffalo-L embeddings for face recognition, RetinaFace for face detection with landmarks, and PostgreSQL with pgvector extension for efficient vector similarity search.
 
 **📚 Technical Documentation:** See [TECHNICAL_DETAILS.md](TECHNICAL_DETAILS.md) for comprehensive technical documentation including image processing pipelines, coordinate transformations, model inference workflows, and performance optimizations.
 
@@ -18,12 +18,12 @@ FaceVector Engine - A production-ready face recognition and vector similarity se
 ```bash
 make install          # Install Node dependencies (production only)
 make install-dev      # Install all dependencies including dev tools
-make models           # Download ONNX models (arcface.onnx, retinaface_resnet50.onnx) to models/
+make models           # Download ONNX models (face_recognition.onnx, retinaface_resnet50.onnx) to models/
 make chmod-scripts    # Make scripts in scripts/ executable
 ```
 
 **Model Downloads** (`make models`):
-- ArcFace (arcfaceresnet100-8.onnx) from HuggingFace → saved as `models/arcface.onnx`
+- InsightFace Buffalo-L (`w600k_r50.onnx`) from HuggingFace → saved as `models/face_recognition.onnx`
 - RetinaFace ResNet50 from Google Storage → saved as `models/retinaface_resnet50.onnx`
 - Models only downloaded if they don't already exist
 
@@ -56,9 +56,9 @@ make lint-fix         # Auto-fix TypeScript code style issues
 ## Architecture
 
 ### Core Flow
-1. **Server startup** (`src/server.ts`): Initialize DB connection → Load ONNX models (ArcFace + RetinaFace) → Start Express server
+1. **Server startup** (`src/server.ts`): Initialize DB connection → Load ONNX models (InsightFace + RetinaFace) → Start Express server
 2. **Face detection** (`src/retinaface.ts`, `src/embedding.ts`): RetinaFace detects faces with configurable thresholds
-3. **Embedding generation** (`src/embedding.ts`): ArcFace generates 512-dim vectors from 112x112 RGB images
+3. **Embedding generation** (`src/embedding.ts`): InsightFace generates 512-dim vectors from landmark-aligned 112x112 BGR images
 4. **Storage** (`src/db.ts`): PostgreSQL with pgvector extension for vector similarity search
    - `detected_faces` table: Face metadata and file paths from detection
    - `enrolled_customers` table: Customer info with face embeddings for recognition
@@ -67,15 +67,15 @@ make lint-fix         # Auto-fix TypeScript code style issues
 ### Key Components
 
 **ONNX Model Pipeline**:
-- `initModels()` (`src/embedding.ts`): Loads ArcFace (embedding) and RetinaFace (detection) ONNX models at startup
+- `initModels()` (`src/embedding.ts`): Loads InsightFace (embedding) and RetinaFace (detection) ONNX models at startup
 - `detectAllFacesWithRetinaFace(base64)` (`src/embedding.ts`): RetinaFace inference returning all detected faces with bounding boxes
   - Input: 640x640 (mobile) or 840x840 (resnet50) resized image
   - Multi-scale detection with strides [8, 16, 32]
   - Default confidence threshold: 0.8 (VIS_THRESHOLD), configurable via env var FACE_DETECTION_CONFIDENCE_THRESHOLD
   - NMS (Non-Maximum Suppression) threshold: 0.4 to filter overlapping boxes
   - Returns array of faces sorted by area (largest first) with landmarks (eyes, nose, mouth)
-- `preprocessImage(base64)` (`src/embedding.ts`): Resize to 112x112, normalize to [-1, 1] per channel
-- `computeEmbedding(preprocessed)` (`src/embedding.ts`): ArcFace inference → 512-dim Float32Array
+- `preprocessImage(base64)` (`src/embedding.ts`): Resize to 112x112, BGR channel-first layout, normalize to [-1, 1] per channel
+- `computeEmbedding(preprocessed)` (`src/embedding.ts`): InsightFace inference → 512-dim Float32Array
 - RetinaFace model (`src/retinaface.ts`): Detects faces with 5 facial landmarks per face
 
 **Database Layer** (`src/db.ts`):
@@ -86,15 +86,15 @@ make lint-fix         # Auto-fix TypeScript code style issues
   - `face_embeddings(id uuid, embedding vector(512), image_path text, created_at timestamptz)` - Legacy table
 - ivfflat index on `enrolled_customers.embedding` for fast similarity search
 - Handles collation version mismatches (suggests `make clean` if detected)
-- Images stored in MinIO S3 object storage, S3 keys stored in `original_image_path` and `face_image_path` columns
+- Images stored in RustFS S3-compatible object storage, S3 keys stored in `original_image_path` and `face_image_path` columns
 
 **Service Layer**:
 - `src/services/faceDetectionService.ts`: Detect faces, crop, and store metadata
   - `detectAndStoreFaces()`: Main detection workflow
-  - Uploads original images to MinIO S3: `originals/{uuid}.jpg`
-  - Uploads cropped faces to MinIO S3: `faces/{face_id}.jpg`
+  - Uploads normalized original images to RustFS S3: `originals/{uuid}.jpg`
+  - Uploads cropped faces to RustFS S3: `faces/{face_id}.jpg`
   - Stores S3 keys (not file paths) in database
-- `src/services/s3Service.ts`: MinIO S3 storage service
+- `src/services/s3Service.ts`: RustFS S3-compatible storage service
   - `uploadImage()`: Upload image buffer to S3
   - `downloadImage()`: Download image from S3 as buffer
   - `deleteImage()`: Delete image from S3
@@ -118,7 +118,7 @@ make lint-fix         # Auto-fix TypeScript code style issues
 **Middleware**:
 - `src/middleware/upload.ts`: Multer configuration for multipart file uploads
   - Memory storage for file buffers
-  - Accepts PNG, JPG, WEBP (max 10MB)
+  - Accepts PNG, JPG, WEBP, AVIF (max 10MB)
   - File type validation
 
 **Controllers** (`src/controllers/`):
@@ -153,7 +153,7 @@ make lint-fix         # Auto-fix TypeScript code style issues
 
 ### Error Handling
 - All face-processing endpoints throw `{code: "NO_FACE"}` errors → Returns `{"error": "no_face_detected"}` (400)
-- Face detection configured to reject images without faces (e.g., `examples/box.jpeg`)
+- Face detection configured to reject images without faces (e.g., `examples/no_face_box.jpeg`)
 - Standardized error responses via `responseHelpers.sendErrorResponse()`
 
 ### API Input Format & Storage
@@ -161,36 +161,39 @@ make lint-fix         # Auto-fix TypeScript code style issues
 **Multipart Upload Design:**
 - Primary API accepts multipart form-data (actual file uploads)
 - Scripts handle file path → multipart conversion automatically
-- Images automatically scaled down (max 1920px) for performance
-- Supports PNG, JPG, WEBP formats (max 10MB per file)
+- Images normalized through Sharp into auto-rotated JPEG buffers, then scaled down (max 1920px) for performance
+- Supports PNG, JPG, WEBP, AVIF formats (max 10MB per file)
 - API is stateless and production-ready
 
 **ONNX Models:**
-- ArcFace: `models/arcface.onnx` (face embeddings)
+- Face recognition: `models/face_recognition.onnx` (InsightFace embeddings)
 - RetinaFace: `models/retinaface_resnet50.onnx` (face detection)
 - Downloaded via `make models` from HuggingFace/Google Storage
 
 **Storage Architecture:**
-- **MinIO S3 Object Storage** (bucket: `facevector-engine`):
-  - `originals/{uuid}.jpg` - Original uploaded images
+- **RustFS S3-Compatible Object Storage** (bucket: `facevector-engine`):
+  - `originals/{uuid}.jpg` - Normalized uploaded images
   - `faces/{face_id}.jpg` - Cropped face images
   - S3 keys stored in `detected_faces` table columns
-  - Access MinIO Console at http://localhost:9001
+  - Access RustFS Console at http://localhost:9001
 - **Temporary Files** (ephemeral, inside Docker):
   - `/tmp/facevector/cropped_faces/` - Temporary face crops during processing
   - Auto-cleaned on container restart, no volume mount needed
 
 ## Testing
 Use example images in `examples/` folder:
-- `elon_musk_1.jpg`, `elon_musk_2.jpg` - Valid face images for testing (same person)
-- `elon_musk_trump.jpg` - Multiple faces in one image
-- `xijingping.png`, `xijingping_trump.jpeg` - Additional test images
-- `box.jpeg` - No face (for testing detection rejection)
+- `elon_musk_enroll.jpg`, `elon_musk_positive.jpg` - Valid Elon images for testing (same person)
+- `jensen_huang_enroll.jpg`, `jensen_huang_positive.jpg` - Valid Jensen images for testing (same person)
+- `elon_musk_trump_mixed_small.jpg`, `xi_jinping_trump_mixed_small.jpeg` - Multiple faces in one image
+- `elon_musk_jensen_huang_mixed_large.webp`, `elon_musk_jensen_huang_mixed_large.avif` - Multi-format normalization fixtures
+- `elon_musk_profile.jpg`, `trump_jensen_huang_mixed_profile.jpeg` - Hard profile/angle examples
+- `xi_jinping_solo.png` - Additional negative test image
+- `no_face_box.jpeg` - No face (for testing detection rejection)
 
 Example scripts in `scripts/` (run `make chmod-scripts` first):
 ```bash
 # Main workflow
-./scripts/faces-detect.sh examples/elon_musk_1.jpg [identifier]
+./scripts/faces-detect.sh examples/elon_musk_enroll.jpg [identifier]
 ./scripts/faces-get-image.sh <face_id>
 ./scripts/faces-enroll.sh <face_id> <customer_id> [name]
 ./scripts/faces-recognize.sh <face_id>
@@ -210,7 +213,7 @@ All scripts accept optional API URL as last parameter (default: http://localhost
 **Workflow Example:**
 ```bash
 # 1. Detect face and get face_id
-./scripts/faces-detect.sh examples/elon_musk_1.jpg CUST001
+./scripts/faces-detect.sh examples/elon_musk_enroll.jpg CUST001
 # Response: [{"face_id": "abc-123...", ...}]
 
 # 2. Enroll the customer
@@ -218,12 +221,12 @@ All scripts accept optional API URL as last parameter (default: http://localhost
 # Response: {"customer_id": "xyz-789...", ...}
 
 # 3. Later, detect face in another image of the same person
-./scripts/faces-detect.sh examples/elon_musk_2.jpg
+./scripts/faces-detect.sh examples/elon_musk_positive.jpg
 # Response: [{"face_id": "def-456...", ...}]
 
 # 4. Recognize who it is
 ./scripts/faces-recognize.sh def-456...
-# Response: [{"customer_identifier": "CUST001", "confidence_score": 0.98, ...}]
+# Response: [{"customer_identifier": "CUST001", "confidence_score": 0.6708, ...}]
 ```
 
 ## Configuration
@@ -232,15 +235,13 @@ All scripts accept optional API URL as last parameter (default: http://localhost
 - `DATABASE_URL`: PostgreSQL connection string (default: `postgres://postgres:postgres@localhost:5432/face_db`)
 - `PORT`: API server port (default: 3000)
 - `FACE_DETECTION_CONFIDENCE_THRESHOLD`: Face detection confidence threshold 0.0-1.0 (default: 0.8)
-- **MinIO S3 Configuration:**
-  - `MINIO_ROOT_USER`: MinIO admin username (default: minioadmin)
-  - `MINIO_ROOT_PASSWORD`: MinIO admin password (default: minioadmin123)
-  - `S3_ENDPOINT`: S3 endpoint URL (default: http://localhost:9000 for local, http://minio:9000 inside Docker)
+- **RustFS S3 Configuration:**
+  - `S3_ENDPOINT`: S3 endpoint URL (default: http://localhost:9000 for local, http://rustfs:9000 inside Docker)
   - `S3_BUCKET`: S3 bucket name (default: facevector-engine)
-  - `S3_ACCESS_KEY`: S3 access key (default: minioadmin)
-  - `S3_SECRET_KEY`: S3 secret key (default: minioadmin123)
+  - `S3_ACCESS_KEY`: S3 access key (default: rustfsadmin)
+  - `S3_SECRET_KEY`: S3 secret key (default: rustfsadmin)
   - `S3_REGION`: S3 region (default: us-east-1)
-  - `S3_FORCE_PATH_STYLE`: Use path-style URLs for MinIO (default: true)
+  - `S3_FORCE_PATH_STYLE`: Use path-style URLs for RustFS (default: true)
 
 **Configuration Constants** (`src/config/constants.ts`):
 - `RETINAFACE.CONFIDENCE_THRESHOLD`: 0.02 (initial detection threshold, filtered by VIS_THRESHOLD later)
@@ -279,8 +280,3 @@ All scripts accept optional API URL as last parameter (default: http://localhost
 - `tsx`: TypeScript execution for development
 - `eslint`: Code linting
 - `@types/*`: TypeScript type definitions
-
-**Removed (no longer used):**
-- `uuid`: Replaced with Node.js built-in `crypto.randomUUID()`
-- `body-parser`: Replaced with Express built-in `express.json()`
-- `zod`: Validation removed (now done at application level)

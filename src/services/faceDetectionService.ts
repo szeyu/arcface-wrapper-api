@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import { detectAllFacesWithRetinaFace } from "../embedding";
-import { cropImageRegion } from "../utils/imageUtils";
+import { alignFaceFromLandmarks, cropImageRegion } from "../utils/imageUtils";
 import { client } from "../db";
 import { s3Service } from "./s3Service";
 
@@ -47,14 +47,16 @@ export const detectAndStoreFaces = async (
     const pixelBox = face.PixelBoundingBox;
     const confidence = face.Confidence;
 
-    // Crop face region
-    const croppedFaceBase64 = await cropImageRegion(
-      imageBase64,
-      pixelBox.Left,
-      pixelBox.Top,
-      pixelBox.Width,
-      pixelBox.Height
-    );
+    // The recognition model expects a landmark-aligned 112x112 face, not a raw bounding-box crop.
+    const croppedFaceBase64 = face.Landmarks?.length
+      ? await alignFaceFromLandmarks(imageBase64, face.Landmarks)
+      : await cropImageRegion(
+          imageBase64,
+          pixelBox.Left,
+          pixelBox.Top,
+          pixelBox.Width,
+          pixelBox.Height
+        );
 
     // Store cropped face image to S3
     const faceImageKey = `faces/${faceId}.jpg`;

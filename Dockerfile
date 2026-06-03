@@ -22,18 +22,18 @@ COPY models ./models/
 # Note: If models directory is empty or missing files, they will be downloaded/cached
 RUN --mount=type=cache,target=/tmp/models-cache \
     mkdir -p models && \
-    if [ ! -f models/arcface.onnx ]; then \
-      if [ -f /tmp/models-cache/arcface.onnx ]; then \
-        echo "✓ Using cached arcface.onnx from Docker cache" && \
-        cp /tmp/models-cache/arcface.onnx models/arcface.onnx; \
+    if [ ! -f models/face_recognition.onnx ]; then \
+      if [ -f /tmp/models-cache/face_recognition.onnx ]; then \
+        echo "✓ Using cached face_recognition.onnx from Docker cache" && \
+        cp /tmp/models-cache/face_recognition.onnx models/face_recognition.onnx; \
       else \
-        echo "↓ Downloading arcface.onnx (this may take a while)..." && \
-        curl -L -o models/arcface.onnx https://huggingface.co/onnxmodelzoo/arcfaceresnet100-8/resolve/main/arcfaceresnet100-8.onnx && \
-        cp models/arcface.onnx /tmp/models-cache/arcface.onnx || true && \
-        echo "✓ arcface.onnx downloaded and cached"; \
+        echo "↓ Downloading face_recognition.onnx (this may take a while)..." && \
+        curl -fL -o models/face_recognition.onnx https://huggingface.co/deepghs/insightface/resolve/main/buffalo_l/w600k_r50.onnx && \
+        cp models/face_recognition.onnx /tmp/models-cache/face_recognition.onnx || true && \
+        echo "✓ face_recognition.onnx downloaded and cached"; \
       fi; \
     else \
-      echo "✓ Using arcface.onnx from host"; \
+      echo "✓ Using face_recognition.onnx from host"; \
     fi && \
     if [ ! -f models/retinaface_resnet50.onnx ]; then \
       if [ -f /tmp/models-cache/retinaface_resnet50.onnx ]; then \
@@ -41,7 +41,7 @@ RUN --mount=type=cache,target=/tmp/models-cache \
         cp /tmp/models-cache/retinaface_resnet50.onnx models/retinaface_resnet50.onnx; \
       else \
         echo "↓ Downloading retinaface_resnet50.onnx (this may take a while)..." && \
-        curl -L -o models/retinaface_resnet50.onnx https://storage.googleapis.com/ailia-models/retinaface/retinaface_resnet50.onnx && \
+        curl -fL -o models/retinaface_resnet50.onnx https://storage.googleapis.com/ailia-models/retinaface/retinaface_resnet50.onnx && \
         cp models/retinaface_resnet50.onnx /tmp/models-cache/retinaface_resnet50.onnx || true && \
         echo "✓ retinaface_resnet50.onnx downloaded and cached"; \
       fi; \

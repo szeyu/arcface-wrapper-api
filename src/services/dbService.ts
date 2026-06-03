@@ -41,10 +41,16 @@ export const deleteEmbeddingById = async (id: string): Promise<boolean> => {
 
 export const searchSimilarEmbeddings = async (embedding: number[], limit: number) => {
   const result = await client.query(
-    "SELECT id, 1 - (embedding <=> $1) as cosine FROM face_embeddings ORDER BY embedding <-> $1 LIMIT $2",
+    `WITH scored_matches AS MATERIALIZED (
+       SELECT id, 1 - (embedding <=> $1) as cosine
+       FROM face_embeddings
+     )
+     SELECT id, cosine
+     FROM scored_matches
+     ORDER BY cosine DESC
+     LIMIT $2`,
     [vectorToSql(embedding), limit]
   );
   return result.rows;
 };
-
 

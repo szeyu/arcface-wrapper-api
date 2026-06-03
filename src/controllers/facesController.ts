@@ -5,6 +5,7 @@ import { sendErrorResponse } from "../utils/responseHelpers";
 import { client, vectorToSql } from "../db";
 import { computeEmbedding, preprocessImage } from "../embedding";
 import { s3Service } from "../services/s3Service";
+import { getDefaultRecognitionConfidenceThreshold } from "../config/constants";
 
 /**
  * POST /faces/detect
@@ -131,10 +132,24 @@ export const enrollFace = async (req: Request, res: Response): Promise<void> => 
  */
 export const recognizeFace = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { face_id } = req.body;
+    const { face_id, min_confidence } = req.body;
 
     if (!face_id) {
       res.status(400).json({ error: "face_id is required" });
+      return;
+    }
+
+    const recognitionThreshold =
+      typeof min_confidence === "number"
+        ? min_confidence
+        : getDefaultRecognitionConfidenceThreshold();
+
+    if (
+      !Number.isFinite(recognitionThreshold) ||
+      recognitionThreshold < 0 ||
+      recognitionThreshold > 1
+    ) {
+      res.status(400).json({ error: "min_confidence must be a number between 0 and 1" });
       return;
     }
 
@@ -162,24 +177,34 @@ export const recognizeFace = async (req: Request, res: Response): Promise<void> 
 
     // Search for similar customers in vector DB
     const searchResult = await client.query(
-      `SELECT
-         id as customer_id,
+      `WITH scored_matches AS MATERIALIZED (
+         SELECT
+           id as customer_id,
+           customer_identifier,
+           customer_name,
+           1 - (embedding <=> $1) as confidence_score
+         FROM enrolled_customers
+       )
+       SELECT
+         customer_id,
          customer_identifier,
          customer_name,
-         1 - (embedding <=> $1) as confidence_score
-       FROM enrolled_customers
-       ORDER BY embedding <=> $1
+         confidence_score
+       FROM scored_matches
+       ORDER BY confidence_score DESC
        LIMIT 10`,
       [vectorToSql(embeddingArray)]
     );
 
     // Format results
-    const matches = searchResult.rows.map((row) => ({
-      customer_id: row.customer_id,
-      customer_identifier: row.customer_identifier,
-      customer_name: row.customer_name,
-      confidence_score: parseFloat(row.confidence_score.toFixed(4)),
-    }));
+    const matches = searchResult.rows
+      .map((row) => ({
+        customer_id: row.customer_id,
+        customer_identifier: row.customer_identifier,
+        customer_name: row.customer_name,
+        confidence_score: parseFloat(row.confidence_score.toFixed(4)),
+      }))
+      .filter((match) => match.confidence_score >= recognitionThreshold);
 
     res.json(matches);
   } catch (error: unknown) {

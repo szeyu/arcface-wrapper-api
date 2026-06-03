@@ -1,6 +1,6 @@
 # FaceVector Engine
 
-A production-ready face recognition and vector similarity search engine. Built with Node.js/TypeScript, this API provides a two-step workflow for face detection, customer enrollment, and recognition using state-of-the-art ArcFace embeddings, RetinaFace detection, and PostgreSQL pgvector for efficient similarity search.
+A production-ready face recognition and vector similarity search engine. Built with Node.js/TypeScript, this API provides a two-step workflow for face detection, customer enrollment, and recognition using InsightFace Buffalo-L embeddings, RetinaFace detection, and PostgreSQL pgvector for efficient similarity search.
 
 > 📚 **For detailed technical documentation**, see [TECHNICAL_DETAILS.md](TECHNICAL_DETAILS.md) - comprehensive guide covering image processing pipelines, coordinate transformations, model inference, and performance optimizations.
 
@@ -9,10 +9,10 @@ A production-ready face recognition and vector similarity search engine. Built w
 - ✅ **Face Detection** - Detect faces with 5 facial landmarks using RetinaFace ResNet50
 - ✅ **Face Enrollment** - Enroll customers with face embeddings for recognition
 - ✅ **Face Recognition** - Identify customers by searching similar face embeddings
-- ✅ **Multipart Upload** - Upload images as files (PNG, JPG, WEBP) with automatic scaling
+- ✅ **Multipart Upload** - Upload images as files (PNG, JPG, WEBP, AVIF) with automatic normalization and scaling
 - ✅ **Two-Step Workflow** - Detect faces first, then enroll or recognize them
 - ✅ **Vector Similarity Search** - PostgreSQL pgvector with optimized ivfflat indexing
-- ✅ **512-dim Embeddings** - ArcFace ResNet100 for high-accuracy face recognition
+- ✅ **512-dim Embeddings** - InsightFace Buffalo-L embeddings for high-accuracy face recognition
 - ✅ **Docker Support** - Easy deployment with Docker Compose
 - ✅ **TypeScript** - Fully typed codebase
 
@@ -25,52 +25,61 @@ flowchart TB
     end
 
     subgraph API["API Server (Express + TypeScript)"]
-        DETECT[POST /faces/detect<br/>Detect & Store Faces]
-        ENROLL[POST /faces/enroll<br/>Enroll Customer]
-        RECOGNIZE[POST /faces/recognize<br/>Recognize Customer]
-        GET[GET /faces/:face_id<br/>Get Face Image]
+        DETECT["`POST /faces/detect
+Detect & Store Faces`"]
+        ENROLL["`POST /faces/enroll
+Enroll Customer`"]
+        RECOGNIZE["`POST /faces/recognize
+Recognize Customer`"]
+        GET["`GET /faces/:face_id
+Get Face Image`"]
     end
 
     subgraph Models["AI Models (ONNX Runtime)"]
-        RETINAFACE[RetinaFace ResNet50<br/>Face Detection]
-        ARCFACE[ArcFace ResNet100<br/>512-dim Embeddings]
+        RETINAFACE["`RetinaFace ResNet50
+Face Detection`"]
+        RECOGNITION["`InsightFace Buffalo-L
+512-dim Embeddings`"]
     end
 
     subgraph Storage["Storage Layer"]
-        DETECTED[(detected_faces table<br/>Face metadata)]
-        ENROLLED[(enrolled_customers table<br/>Vector embeddings)]
-        MINIO[MinIO S3<br/>Object Storage]
+        DETECTED[("`detected_faces table
+Face metadata`")]
+        ENROLLED[("`enrolled_customers table
+Vector embeddings`")]
+        RUSTFS["`RustFS S3
+Object Storage`"]
     end
 
     USER -->|Upload Image| DETECT
     DETECT -->|Detect Faces| RETINAFACE
     RETINAFACE -->|Bounding Boxes| DETECT
     DETECT -->|Store Metadata| DETECTED
-    DETECT -->|Store Images| MINIO
+    DETECT -->|Store Images| RUSTFS
     DETECT -->|face_id| USER
 
     USER -->|face_id + customer_info| ENROLL
-    ENROLL -->|Read Face| MINIO
-    ENROLL -->|Generate Embedding| ARCFACE
-    ARCFACE -->|512-dim Vector| ENROLL
+    ENROLL -->|Read Face| RUSTFS
+    ENROLL -->|Generate Embedding| RECOGNITION
+    RECOGNITION -->|512-dim Vector| ENROLL
     ENROLL -->|Store| ENROLLED
 
     USER -->|face_id| RECOGNIZE
-    RECOGNIZE -->|Read Face| MINIO
-    RECOGNIZE -->|Generate Embedding| ARCFACE
+    RECOGNIZE -->|Read Face| RUSTFS
+    RECOGNIZE -->|Generate Embedding| RECOGNITION
     RECOGNIZE -->|Vector Search| ENROLLED
     ENROLLED -->|Matched Customers| RECOGNIZE
     RECOGNIZE -->|Results| USER
 
     USER -->|face_id| GET
-    GET -->|Read| MINIO
-    MINIO -->|Image| USER
+    GET -->|Read| RUSTFS
+    RUSTFS -->|Image| USER
 
     style RETINAFACE fill:#e1f5ff
-    style ARCFACE fill:#e1f5ff
+    style RECOGNITION fill:#e1f5ff
     style DETECTED fill:#fff4e1
     style ENROLLED fill:#fff4e1
-    style MINIO fill:#ffe1f5
+    style RUSTFS fill:#ffe1f5
 ```
 
 ## Requirements
@@ -122,17 +131,17 @@ Detect all faces in an uploaded image, store face crops and metadata, and return
 **POST** `/api/faces/detect`
 
 **Request:** Multipart form-data
-- `file` (required): Image file (PNG, JPG, WEBP, max 10MB)
+- `file` (required): Image file (PNG, JPG, WEBP, AVIF, max 10MB)
 - `identifier` (optional): Client-provided identifier for tracking
 
 ```bash
 # Using curl
 curl -X POST http://localhost:3000/api/faces/detect \
-  -F "file=@examples/elon_musk_1.jpg" \
+  -F "file=@examples/elon_musk_enroll.jpg" \
   -F "identifier=customer_123"
 
 # Using script
-./scripts/faces-detect.sh examples/elon_musk_1.jpg customer_123
+./scripts/faces-detect.sh examples/elon_musk_enroll.jpg customer_123
 ```
 
 **Response:**
@@ -214,15 +223,18 @@ Recognize a customer by searching for similar enrolled face embeddings.
 
 **Request:** JSON
 - `face_id` (required): UUID from `/faces/detect`
+- `min_confidence` (optional): Minimum similarity required to return a match. Defaults to `FACE_RECOGNITION_CONFIDENCE_THRESHOLD`.
+
+`confidence_score` is cosine similarity, not a calibrated probability. The default threshold of `0.5` is intended to avoid false positives on normal probes. If a real same-person image falls below this value, prefer adding stronger or multiple enrollment images for that person before lowering the global threshold.
 
 ```bash
 # Using curl
 curl -X POST http://localhost:3000/api/faces/recognize \
   -H "Content-Type: application/json" \
-  -d '{"face_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"}'
+  -d '{"face_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "min_confidence": 0.5}'
 
 # Using script
-./scripts/faces-recognize.sh a1b2c3d4-e5f6-7890-abcd-ef1234567890
+./scripts/faces-recognize.sh a1b2c3d4-e5f6-7890-abcd-ef1234567890 http://localhost:3000 0.5
 ```
 
 **Response:**
@@ -232,18 +244,18 @@ curl -X POST http://localhost:3000/api/faces/recognize \
     "customer_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
     "customer_identifier": "CUST001",
     "customer_name": "John Doe",
-    "confidence_score": 0.9856
+    "confidence_score": 0.6708
   },
   {
     "customer_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
     "customer_identifier": "CUST002",
     "customer_name": "Jane Smith",
-    "confidence_score": 0.7234
+    "confidence_score": 0.4123
   }
 ]
 ```
 
-Results are sorted by confidence score (descending), returns top 10 matches.
+Results are sorted by confidence score (descending), returns up to 10 matches that pass the configured confidence threshold. An empty array (`[]`) means the nearest enrolled face did not pass the threshold and should be treated as "no match".
 
 ## Management Endpoints
 
@@ -351,7 +363,7 @@ Deletes an enrolled customer record.
 
 ```bash
 # 1. Detect faces in an image
-./scripts/faces-detect.sh examples/elon_musk_1.jpg CUSTOMER_001
+./scripts/faces-detect.sh examples/elon_musk_enroll.jpg CUSTOMER_001
 # Response: [{"face_id": "abc-123...", ...}]
 
 # 2. Enroll the customer
@@ -359,19 +371,119 @@ Deletes an enrolled customer record.
 # Response: {"customer_id": "xyz-789...", ...}
 
 # 3. Later, detect face in another image of the same person
-./scripts/faces-detect.sh examples/elon_musk_2.jpg
+./scripts/faces-detect.sh examples/elon_musk_positive.jpg
 # Response: [{"face_id": "def-456...", ...}]
 
 # 4. Recognize the customer
 ./scripts/faces-recognize.sh def-456...
-# Response: [{"customer_identifier": "CUSTOMER_001", "confidence_score": 0.98, ...}]
+# Response: [{"customer_identifier": "CUSTOMER_001", "confidence_score": 0.6708, ...}]
 
 # 5. Retrieve the original face image
 ./scripts/faces-get-image.sh abc-123...
 # Saves image to: output/retrieved_face.jpg
 ```
 
+## Positive and Negative Recognition Examples
+
+The `examples/` folder includes curated recognition samples:
+
+| Purpose | Image |
+|---------|-------|
+| Enroll Elon | `examples/elon_musk_enroll.jpg` |
+| Positive Elon probe | `examples/elon_musk_positive.jpg` |
+| Enroll Jensen | `examples/jensen_huang_enroll.jpg` |
+| Positive Jensen probe | `examples/jensen_huang_positive.jpg` |
+| Negative probe, should not match enrolled examples | `examples/xi_jinping_solo.png` |
+| Multi-format mixed scene | `examples/elon_musk_jensen_huang_mixed_large.webp` |
+| AVIF mixed scene | `examples/elon_musk_jensen_huang_mixed_large.avif` |
+| Hard profile probe | `examples/elon_musk_profile.jpg` |
+
+Run the smoke test against a running API:
+
+```bash
+./scripts/verify-recognition-examples.sh
+
+# Optional: custom API URL and threshold
+./scripts/verify-recognition-examples.sh http://localhost:3000 0.5
+```
+
+Expected result:
+- The positive images return the enrolled Elon and Jensen customers.
+- The negative image returns `[]`.
+- If the negative image returns a customer, raise `FACE_RECOGNITION_CONFIDENCE_THRESHOLD` and inspect the aligned face image.
+- Profile and small mixed-scene examples are intentionally hard cases. Tests use them to make sure weak crops do not become false positives at the default threshold.
+- `src/__tests__/examples.test.ts` runs detection against every image file in `examples/` and fails if a new image is added without updating the fixture matrix.
+
+### Performance Benchmark
+
+Run the benchmark against a running API:
+
+```bash
+# Terminal 1
+make run
+
+# Terminal 2
+make benchmark-performance
+```
+
+The benchmark measures real API calls for single-face JPEG detection, multi-face JPEG detection, WEBP/AVIF detection, recognition-only lookup, positive detect+recognize flow, and negative detect+recognize flow. It writes JSON and Markdown reports to `benchmarks/results/`, which is ignored by git.
+
+Latest local benchmark sample:
+
+| Field | Value |
+|-------|-------|
+| Platform | Linux x64 |
+| Node.js | v24.16.0 |
+| Iterations | 3 |
+| ONNX execution provider | CPU |
+| GPU acceleration measured | - |
+| Database | Local Docker PostgreSQL + pgvector |
+| Object storage | Local Docker RustFS |
+
+| Operation | Count | P50 ms | P95 ms | Avg ms |
+|-----------|-------|--------|--------|--------|
+| `detect_single_face_jpeg` | 3 | 2919.14 | 3297.33 | 2622.87 |
+| `detect_multi_face_jpeg` | 3 | 2451.76 | 2817.55 | 2515.09 |
+| `detect_webp` | 3 | 8725.34 | 10114.76 | 9164.42 |
+| `detect_avif` | 3 | 1450.02 | 1491.38 | 1421.55 |
+| `recognize` | 3 | 269.03 | 276.40 | 243.17 |
+| `full_positive_flow` | 3 | 2722.87 | 2920.38 | 2720.47 |
+| `full_negative_flow` | 3 | 2871.55 | 3492.04 | 3068.68 |
+
+Optional arguments:
+
+```bash
+npm run benchmark -- http://localhost:3000 5 benchmarks/results
+```
+
+Arguments are `api_url`, `iterations`, and `output_dir`.
+
 ## Database Schema
+
+```mermaid
+erDiagram
+    detected_faces ||--o| enrolled_customers : enrolls
+
+    detected_faces {
+        uuid id PK
+        text original_image_path
+        text face_image_path
+        text identifier
+        jsonb bounding_box
+        float confidence
+        timestamptz created_at
+    }
+
+    enrolled_customers {
+        uuid id PK
+        uuid face_id FK
+        text customer_identifier
+        text customer_name
+        jsonb customer_metadata
+        vector embedding
+        timestamptz created_at
+    }
+```
 
 ### `detected_faces` Table
 Stores detected face metadata from the detect endpoint.
@@ -396,21 +508,21 @@ Stores enrolled customer information with face embeddings.
 | customer_identifier | text | Unique customer identifier |
 | customer_name | text | Customer name (optional) |
 | customer_metadata | jsonb | Additional metadata (optional) |
-| embedding | vector(512) | ArcFace face embedding |
+| embedding | vector(512) | InsightFace face embedding |
 | created_at | timestamptz | Timestamp |
 
 Vector search is optimized with ivfflat index on the embedding column.
 
-## Image Scaling
+## Image Normalization and Scaling
 
-All uploaded images are automatically scaled down (max 1920px on longest side) to improve processing performance while maintaining aspect ratio. Supports PNG, JPG, and WEBP formats up to 10MB.
+All uploaded images are normalized through Sharp into auto-rotated JPEG buffers, then scaled down (max 1920px on longest side) to improve processing performance while maintaining aspect ratio. Supports PNG, JPG, WEBP, and AVIF formats up to 10MB.
 
 ## Technology Stack
 
 - **Face Detection**: RetinaFace ResNet50 with 5 facial landmarks
-- **Face Recognition**: ArcFace ResNet100 (512-dimensional embeddings)
+- **Face Recognition**: InsightFace Buffalo-L (512-dimensional embeddings)
 - **Vector Search**: PostgreSQL pgvector with ivfflat indexing
-- **Object Storage**: MinIO S3-compatible storage for images
+- **Object Storage**: RustFS S3-compatible storage for images
 - **Image Processing**: Jimp for manipulation, multer for uploads
 - **API Framework**: Express.js with TypeScript
 - **ML Runtime**: ONNX Runtime Node
@@ -429,23 +541,24 @@ PORT=3000
 # Face Detection (0.0 - 1.0, default: 0.8)
 FACE_DETECTION_CONFIDENCE_THRESHOLD=0.8
 
-# MinIO S3 Storage
-MINIO_ROOT_USER=minioadmin
-MINIO_ROOT_PASSWORD=minioadmin123
+# Face Recognition (0.0 - 1.0, default: 0.5)
+FACE_RECOGNITION_CONFIDENCE_THRESHOLD=0.5
+
+# RustFS S3-Compatible Storage
 S3_ENDPOINT=http://localhost:9000
 S3_BUCKET=facevector-engine
-S3_ACCESS_KEY=minioadmin
-S3_SECRET_KEY=minioadmin123
+S3_ACCESS_KEY=rustfsadmin
+S3_SECRET_KEY=rustfsadmin
 S3_REGION=us-east-1
 S3_FORCE_PATH_STYLE=true
 ```
 
 ## Storage Structure
 
-### MinIO S3 Bucket (facevector-engine)
+### RustFS Bucket (facevector-engine)
 ```
 facevector-engine/
-├── originals/          # Original uploaded images
+├── originals/          # Normalized uploaded images
 │   └── {uuid}.jpg
 └── faces/              # Cropped face images
     └── {face_id}.jpg
@@ -458,7 +571,7 @@ facevector-engine/
     └── face_*.jpg      # Auto-cleaned on container restart
 ```
 
-**MinIO Console**: Access at http://localhost:9001 with credentials from `.env`
+**RustFS Console**: Access at http://localhost:9001 with credentials from `.env`
 
 ## Makefile Commands
 
@@ -468,7 +581,7 @@ make install        # Install dependencies (production only)
 make install-dev    # Install all dependencies including dev
 make models         # Download ONNX models
 make chmod-scripts  # Make scripts executable
-make run            # Run API locally (starts db + minio)
+make run            # Run API locally (starts db + RustFS)
 make lint           # Check code style
 make lint-fix       # Auto-fix code style
 npm run build       # Compile TypeScript
@@ -476,19 +589,23 @@ npm run build       # Compile TypeScript
 
 ### Testing
 ```bash
+make test              # Run full test suite (starts db + RustFS)
 make test-integration  # Run integration tests (full workflow)
 make test-management   # Run management API tests
+make test-examples     # Run every examples/ image through detection
+make test-storage      # Verify RustFS bucket/object operations
+make benchmark-performance  # Benchmark a running API and write reports
 ```
 
 ### Docker
 ```bash
-make up             # Build and start full stack (API + db + minio)
+make up             # Build and start full stack (API + db + RustFS)
 make down           # Stop containers
 make logs           # Tail container logs
 make clean          # Remove containers and volumes
 make reset          # Clean and rebuild from scratch
 make up-db          # Start PostgreSQL only
-make up-minio       # Start MinIO only
+make up-rustfs      # Start RustFS only
 ```
 
 ## Troubleshooting
@@ -501,7 +618,7 @@ make clean && make up
 ### Face Not Detected
 1. Lower `FACE_DETECTION_CONFIDENCE_THRESHOLD` in `.env` (e.g., 0.6)
 2. Ensure clear, front-facing faces in images
-3. Check image format (PNG, JPG, WEBP only)
+3. Check image format (PNG, JPG, WEBP, AVIF only)
 
 ### ONNX Models Not Found
 ```bash
@@ -510,4 +627,4 @@ make models  # Downloads to models/ directory
 
 ## License
 
-MIT License - free to use for any purpose.
+[MIT License](LICENSE) - free to use for any purpose.

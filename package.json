@@ -1,14 +1,18 @@
 {
   "name": "facevector-engine",
   "version": "1.0.0",
-  "description": "FaceVector Engine - Face recognition and vector similarity search API using ArcFace embeddings, RetinaFace detection, and PostgreSQL pgvector",
+  "description": "FaceVector Engine - Face recognition and vector similarity search API using InsightFace embeddings, RetinaFace detection, and PostgreSQL pgvector",
   "main": "dist/server.js",
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
+    "benchmark": "node scripts/benchmark-performance.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -21,7 +25,8 @@
     "multer": "^2.0.2",
     "onnxruntime-node": "^1.23.2",
     "pg": "^8.11.0",
-    "pgvector": "^0.2.1"
+    "pgvector": "^0.2.1",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
